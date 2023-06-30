@@ -267,7 +267,7 @@ def roulette_wheel_selection(a):
   return len(a) - 1, p[-1]
 
 class PolicyGradientAgent:
-    def __init__(self, env, learning_rate=0.01, gamma=0.99):
+    def __init__(self, env, learning_rate=0.01, gamma=0.0):
         self.env = env
         self.learning_rate = learning_rate
         self.gamma = gamma
@@ -289,17 +289,30 @@ class PolicyGradientAgent:
         th.from_numpy(np.random.randint(0, 256, size=(1, 1, 7, 7), dtype=np.uint8)).float()
       ).shape[1]
 
+      hidden_size = 512
       model = nn.Sequential(
               nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0),
               nn.ReLU(),
               nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=0),
               nn.ReLU(),
               nn.Flatten(),
-              nn.Linear(n_flatten, 49),
-              nn.ReLU()
+              nn.Linear(n_flatten, hidden_size),
+              nn.ReLU(),
+              nn.Linear(hidden_size, 49)
       )
-      optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
-      return model, optimizer
+      baseline_net = nn.Sequential(
+              nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0),
+              nn.ReLU(),
+              nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=0),
+              nn.ReLU(),
+              nn.Flatten(),
+              nn.Linear(n_flatten, hidden_size),
+              nn.ReLU(),
+              nn.Linear(hidden_size, 1)
+      )
+      optimizer = optim.Adam(model.parameters(), lr=0.03, weight_decay=0.001)
+      baseline_optimizer = optim.Adam(baseline_net.parameters(), lr=0.03, weight_decay=0.001)
+      return model, baseline_net, optimizer, baseline_optimizer
 
     def choose_action(self, state):
         state = np.transpose(state)
@@ -315,25 +328,34 @@ class PolicyGradientAgent:
         episode_states = th.stack([th.from_numpy(x) for x in episode_states])
         episode_states = episode_states.unsqueeze(1).float()
         discounted_rewards = th.tensor(discounted_rewards, dtype=th.float32)
-        optimizer = self.model[1]
-        # TODO: gamma系数怎么去生效呢？
+        optimizer = self.model[2]
+        baseline_optimizer = self.model[3]
         #criterion = nn.CrossEntropyLoss()
         # 计算损失函数,损失函数为总期望回报.
-        optimizer.zero_grad()
         action_probs = th.softmax(self.model[0](episode_states), dim=1)
         actions_one_hot = nn.functional.one_hot(episode_actions, 49)
-        log_probs = th.log(th.sum(action_probs * actions_one_hot, dim=1))
-        loss = -th.sum(log_probs * discounted_rewards)
+        log_probs = th.sum(action_probs * actions_one_hot, dim=1)
+        baseline = self.model[1](episode_states)
+        loss = -th.sum(log_probs * (discounted_rewards - baseline.detach()))
+        #loss = -th.sum(log_probs * discounted_rewards)
         #print("Action Probs: ", action_probs)
-        #print("Actions Onehot: ", actions_one_hot)
+        #print("Actions Onehot: ", actions_one_hot[0])
         #print("Probs: ", log_probs)
         #print("Discounted rewards: ", discounted_rewards)
         #print("Loss: ", loss.item())
         #logits = self.model[0](episode_states)
         #loss = criterion(logits, episode_actions)
+        #print(baseline)
+        #xxx
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        return loss.item()
+
+        baseline_loss = th.mean((discounted_rewards.detach() - baseline) ** 2)
+        baseline_optimizer.zero_grad()
+        baseline_loss.backward()
+        baseline_optimizer.step()
+        return loss.item(), baseline_loss.item()
 
     # 折扣奖励，从最后一个时间步开始，计算每个时间步的折扣奖励
     def discount_rewards(self, rewards):
@@ -358,7 +380,7 @@ if __name__ == '__main__':
         episode_states, episode_actions, episode_rewards = [], [], []
         done = False
         i = 0
-        while i < 50 and not done:
+        while i < 500 and not done:
             action = agent.choose_action(state)
             next_state, reward, done, info = env.step(action)
             episode_states.append(state)
@@ -366,10 +388,10 @@ if __name__ == '__main__':
             episode_rewards.append(reward)
             state = next_state
             i += 1
-        loss = agent.train(episode_states, episode_actions, episode_rewards)
-        if ((episode % 1) == 0):
-          #print("Process:", episode, " / ", totalsteps, "loss=", loss)
-          print("\033[FProcess:", episode, " / ", totalsteps, "loss=", loss)
+        loss, baseline_loss = agent.train(episode_states, episode_actions, episode_rewards)
+        if ((episode % 10) == 0):
+          #print("Process:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss)
+          print("\033[FProcess:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss)
     model = agent.getModel()
     input("模型训练结束，请按任意键开始走棋!")
     done = False
@@ -419,4 +441,4 @@ if __name__ == '__main__':
       print('Steps: ', steps)
       print('TotalReward: ', env.getTotalReward())
       lastAction = action
-      time.sleep(1)
+      time.sleep(0.3)
