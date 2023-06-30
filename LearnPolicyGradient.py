@@ -1,5 +1,6 @@
 #! /usr/bin/python3
 
+import sys
 import random
 import time
 import math
@@ -79,7 +80,6 @@ class KongmingChessEnv(gym.Env):
         return self.board
 
     def getFinalReward(self):
-      return 0
       if self.remainings == 1 and self.board[3][3] == 0:
         return math.pow(10, 7)
       else:
@@ -267,7 +267,7 @@ def roulette_wheel_selection(a):
   return len(a) - 1, p[-1]
 
 class PolicyGradientAgent:
-    def __init__(self, env, learning_rate=0.01, gamma=0.0):
+    def __init__(self, env, learning_rate=0.01, gamma=0.9):
         self.env = env
         self.learning_rate = learning_rate
         self.gamma = gamma
@@ -373,14 +373,14 @@ if __name__ == '__main__':
     env = KongmingChessEnv()
     agent = PolicyGradientAgent(env)
 
-    totalsteps = 10000
+    totalsteps = 500000
     print("开始训练，总训练步数：", totalsteps, "\n")
     for episode in range(totalsteps):
         state = env.reset()
         episode_states, episode_actions, episode_rewards = [], [], []
         done = False
         i = 0
-        while i < 500 and not done:
+        while i < 100 and not done:
             action = agent.choose_action(state)
             next_state, reward, done, info = env.step(action)
             episode_states.append(state)
@@ -389,9 +389,10 @@ if __name__ == '__main__':
             state = next_state
             i += 1
         loss, baseline_loss = agent.train(episode_states, episode_actions, episode_rewards)
-        if ((episode % 10) == 0):
+        if ((episode % 50) == 0):
           #print("Process:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss)
           print("\033[FProcess:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss)
+          sys.stdout.flush()
     model = agent.getModel()
     input("模型训练结束，请按任意键开始走棋!")
     done = False
@@ -440,5 +441,6 @@ if __name__ == '__main__':
       env.render()
       print('Steps: ', steps)
       print('TotalReward: ', env.getTotalReward())
+      sys.stdout.flush()
       lastAction = action
       time.sleep(0.3)
