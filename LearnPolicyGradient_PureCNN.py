@@ -22,7 +22,6 @@ class KongmingChessEnv(gym.Env):
           for y in chain(range(0, 2), range(5, 7)):
             self.board[x][y] = 4 # 不可点击区域.
         self.reset(rand)
-        self.action_space = gym.spaces.Discrete(7 * 7)
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(7, 7), dtype=np.uint8) # TODO: 是否需要修改为离散空间?
 
     def getObservationSpace(self):
@@ -80,6 +79,7 @@ class KongmingChessEnv(gym.Env):
         return self.board
 
     def getFinalReward(self):
+      return 0
       if self.remainings == 1 and self.board[3][3] == 0:
         return math.pow(10, 7)
       else:
@@ -233,11 +233,13 @@ def make_env():
 def predict_proba(model, state):
   state = np.transpose(state)
   input_tensor = th.from_numpy(state.reshape((1, 1, 7, 7))).float()
-  probs = th.softmax(model(input_tensor), dim=1)
+  probs = th.softmax(model(input_tensor), dim=-1)
   max_prob, predicted_class = th.max(probs, dim=1)
   max_prob = max_prob[0]
   predicred_class = predicted_class[0]
   probs_np = probs.detach().numpy()
+  print(probs_np)
+  sys.stdout.flush()
   probs = []
   s = 0.0
   for i in range(0, 49):
@@ -267,11 +269,10 @@ def roulette_wheel_selection(a):
   return len(a) - 1, p[-1]
 
 class PolicyGradientAgent:
-    def __init__(self, env, learning_rate=0.01, gamma=0.9):
+    def __init__(self, env, learning_rate=0.01, gamma=0.0):
         self.env = env
         self.learning_rate = learning_rate
         self.gamma = gamma
-        self.action_size = env.action_space.n
         self.model = self.build_model()
 
     def build_model(self):
@@ -291,20 +292,24 @@ class PolicyGradientAgent:
 
       hidden_size = 512
       model = nn.Sequential(
-              nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
-              nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
               nn.Flatten(),
-              nn.Linear(n_flatten, 49)
+              nn.Linear(49, hidden_size),
+              nn.ReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, hidden_size),
+              nn.ReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, 49)
       )
       baseline_net = nn.Sequential(
-              nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
-              nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
               nn.Flatten(),
-              nn.Linear(n_flatten, 1)
+              nn.Linear(49, hidden_size),
+              nn.ReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, hidden_size),
+              nn.ReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, 1)
       )
       optimizer = optim.Adam(model.parameters(), lr=0.03, weight_decay=0.001)
       baseline_optimizer = optim.Adam(baseline_net.parameters(), lr=0.03, weight_decay=0.001)
@@ -326,7 +331,6 @@ class PolicyGradientAgent:
         discounted_rewards = th.tensor(discounted_rewards, dtype=th.float32)
         optimizer = self.model[2]
         baseline_optimizer = self.model[3]
-        #criterion = nn.CrossEntropyLoss()
         # 计算损失函数,损失函数为总期望回报.
         action_probs = th.softmax(self.model[0](episode_states), dim=1)
         actions_one_hot = nn.functional.one_hot(episode_actions, 49)
@@ -351,7 +355,15 @@ class PolicyGradientAgent:
         baseline_optimizer.zero_grad()
         baseline_loss.backward()
         baseline_optimizer.step()
-        return loss.item(), baseline_loss.item()
+        grads = {}
+        for name, param in self.model[0].named_parameters():
+          if param.grad is not None:
+            grads[name] = param.grad.norm()
+        baseline_grads = {}
+        for name, param in self.model[1].named_parameters():
+          if param.grad is not None:
+            baseline_grads[name] = param.grad.norm()
+        return loss.item(), baseline_loss.item(), grads, baseline_grads
 
     # 折扣奖励，从最后一个时间步开始，计算每个时间步的折扣奖励
     def discount_rewards(self, rewards):
@@ -369,14 +381,14 @@ if __name__ == '__main__':
     env = KongmingChessEnv()
     agent = PolicyGradientAgent(env)
 
-    totalsteps = 50000
+    totalsteps = 100000
     print("开始训练，总训练步数：", totalsteps, "\n")
     for episode in range(totalsteps):
         state = env.reset()
         episode_states, episode_actions, episode_rewards = [], [], []
         done = False
         i = 0
-        while i < 1000 and not done:
+        while i < 5000 and not done:
             action = agent.choose_action(state)
             next_state, reward, done, info = env.step(action)
             episode_states.append(state)
@@ -384,10 +396,10 @@ if __name__ == '__main__':
             episode_rewards.append(reward)
             state = next_state
             i += 1
-        loss, baseline_loss = agent.train(episode_states, episode_actions, episode_rewards)
+        loss, baseline_loss, grads, baseline_grads = agent.train(episode_states, episode_actions, episode_rewards)
         if ((episode % 50) == 0):
           #print("Process:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss)
-          print("\033[FProcess:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss, "steps=", i, "remainings=", env.getRemainings())
+          print("\033[FProcess:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss, "steps=", i, "remainings=", env.getRemainings(), "grads=", grads, "baselinegrads=", baseline_grads)
           sys.stdout.flush()
     model = agent.getModel()
     input("模型训练结束，请按任意键开始走棋!")

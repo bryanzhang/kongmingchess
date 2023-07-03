@@ -1,5 +1,6 @@
 #! /usr/bin/python3
 
+import heapq
 import sys
 import random
 import time
@@ -22,7 +23,6 @@ class KongmingChessEnv(gym.Env):
           for y in chain(range(0, 2), range(5, 7)):
             self.board[x][y] = 4 # 不可点击区域.
         self.reset(rand)
-        self.action_space = gym.spaces.Discrete(7 * 7)
         self.observation_space = gym.spaces.Box(low=0, high=255, shape=(7, 7), dtype=np.uint8) # TODO: 是否需要修改为离散空间?
 
     def getObservationSpace(self):
@@ -233,11 +233,13 @@ def make_env():
 def predict_proba(model, state):
   state = np.transpose(state)
   input_tensor = th.from_numpy(state.reshape((1, 1, 7, 7))).float()
-  probs = th.softmax(model(input_tensor), dim=1)
+  probs = th.softmax(model(input_tensor), dim=-1)
   max_prob, predicted_class = th.max(probs, dim=1)
   max_prob = max_prob[0]
   predicred_class = predicted_class[0]
   probs_np = probs.detach().numpy()
+  print(probs_np)
+  sys.stdout.flush()
   probs = []
   s = 0.0
   for i in range(0, 49):
@@ -267,19 +269,18 @@ def roulette_wheel_selection(a):
   return len(a) - 1, p[-1]
 
 class PolicyGradientAgent:
-    def __init__(self, env, learning_rate=0.01, gamma=0.9):
+    def __init__(self, env, learning_rate=0.01, gamma=0.0):
         self.env = env
         self.learning_rate = learning_rate
         self.gamma = gamma
-        self.action_size = env.action_space.n
         self.model = self.build_model()
 
     def build_model(self):
       cnn = nn.Sequential(
         nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0),
-        nn.ReLU(),
+        nn.LeakyReLU(),
         nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=0),
-        nn.ReLU(),
+        nn.LeakyReLU(),
         nn.Flatten(),
       )
 
@@ -291,23 +292,27 @@ class PolicyGradientAgent:
 
       hidden_size = 512
       model = nn.Sequential(
-              nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
-              nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
               nn.Flatten(),
-              nn.Linear(n_flatten, 49)
+              nn.Linear(49, hidden_size),
+              nn.LeakyReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, hidden_size),
+              nn.LeakyReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, 49)
       )
       baseline_net = nn.Sequential(
-              nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
-              nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=0),
-              nn.ReLU(),
               nn.Flatten(),
-              nn.Linear(n_flatten, 1)
+              nn.Linear(49, hidden_size),
+              nn.LeakyReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, hidden_size),
+              nn.LeakyReLU(),
+              nn.Dropout(0.2),
+              nn.Linear(hidden_size, 1)
       )
-      optimizer = optim.Adam(model.parameters(), lr=0.03, weight_decay=0.001)
-      baseline_optimizer = optim.Adam(baseline_net.parameters(), lr=0.03, weight_decay=0.001)
+      optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=0.001)
+      baseline_optimizer = optim.Adam(baseline_net.parameters(), lr=self.learning_rate, weight_decay=0.001)
       return model, baseline_net, optimizer, baseline_optimizer
 
     def choose_action(self, state):
@@ -325,15 +330,14 @@ class PolicyGradientAgent:
         episode_states = episode_states.unsqueeze(1).float()
         discounted_rewards = th.tensor(discounted_rewards, dtype=th.float32)
         optimizer = self.model[2]
-        baseline_optimizer = self.model[3]
-        #criterion = nn.CrossEntropyLoss()
+        #baseline_optimizer = self.model[3]
         # 计算损失函数,损失函数为总期望回报.
         action_probs = th.softmax(self.model[0](episode_states), dim=1)
         actions_one_hot = nn.functional.one_hot(episode_actions, 49)
         log_probs = th.sum(action_probs * actions_one_hot, dim=1)
-        baseline = self.model[1](episode_states)
-        loss = -th.sum(log_probs * (discounted_rewards - baseline.detach()))
-        #loss = -th.sum(log_probs * discounted_rewards)
+        #baseline = self.model[1](episode_states)
+        #loss = -th.sum(log_probs * (discounted_rewards - baseline.detach()))
+        loss = -th.sum(log_probs * discounted_rewards)
         #print("Action Probs: ", action_probs)
         #print("Actions Onehot: ", actions_one_hot[0])
         #print("Probs: ", log_probs)
@@ -347,11 +351,20 @@ class PolicyGradientAgent:
         loss.backward()
         optimizer.step()
 
-        baseline_loss = th.mean((discounted_rewards.detach() - baseline) ** 2)
-        baseline_optimizer.zero_grad()
-        baseline_loss.backward()
-        baseline_optimizer.step()
-        return loss.item(), baseline_loss.item()
+        #baseline_loss = th.mean((discounted_rewards.detach() - baseline) ** 2)
+        #baseline_optimizer.zero_grad()
+        #baseline_loss.backward()
+        #baseline_optimizer.step()
+        grads = {}
+        for name, param in self.model[0].named_parameters():
+          if param.grad is not None:
+            grads[name] = param.grad.norm()
+        baseline_grads = {}
+        for name, param in self.model[1].named_parameters():
+          if param.grad is not None:
+            baseline_grads[name] = param.grad.norm()
+        return loss.item(), None, grads, None
+        #return loss.item(), baseline_loss.item(), grads, baseline_grads
 
     # 折扣奖励，从最后一个时间步开始，计算每个时间步的折扣奖励
     def discount_rewards(self, rewards):
@@ -365,29 +378,119 @@ class PolicyGradientAgent:
     def getModel(self):
         return self.model[0]
 
+class Ruleout:
+    def __init__(self, states, actions, rewards, steps, remainings):
+        self.states = states
+        self.actions = actions
+        self.rewards = rewards
+        self.totalRewards = 0
+        for r in rewards:
+            self.totalRewards += r
+        self.steps = steps
+        self.remainings = remainings
+
+    def __lt__(self, other):
+        return self.totalRewards < other.totalRewards
+
+    def __repr_(self):
+        return f"{self.states} {self.actions} {self.rewards} self.totalRewards"
+
+    def getStates(self):
+        return self.states
+
+    def getActions(self):
+        return self.actions
+
+    def getRewards(self):
+        return self.rewards
+
+    def getSteps(self):
+        return self.steps
+
+    def getRemainings(self):
+        return self.remainings
+
+    def getTotalRewards(self):
+        return self.totalRewards
+
 if __name__ == '__main__':
     env = KongmingChessEnv()
     agent = PolicyGradientAgent(env)
 
-    totalsteps = 50000
+    totalsteps = 10000
     print("开始训练，总训练步数：", totalsteps, "\n")
+    latestAvg = -100000
     for episode in range(totalsteps):
-        state = env.reset()
-        episode_states, episode_actions, episode_rewards = [], [], []
-        done = False
-        i = 0
-        while i < 1000 and not done:
-            action = agent.choose_action(state)
+        heap = []
+        rewardsInHeap = 0
+        stepsInHeap = 0
+        remainingsInHeap = 0
+        for j in range(0, 100):
+          i = 0
+          state = env.reset()
+          episode_states, episode_actions, episode_rewards = [], [], []
+          done = False
+          while i < 70 and not done:
+            if j >= 100:
+              action = random.randint(0, 48)
+            else:
+              action = agent.choose_action(state)
             next_state, reward, done, info = env.step(action)
             episode_states.append(state)
             episode_actions.append(action)
             episode_rewards.append(reward)
             state = next_state
             i += 1
-        loss, baseline_loss = agent.train(episode_states, episode_actions, episode_rewards)
-        if ((episode % 50) == 0):
+          ruleout = Ruleout(episode_states, episode_actions, episode_rewards, i, env.getRemainings())
+          if ruleout.getTotalRewards() < latestAvg and ruleout.getTotalRewards() < 0:
+              continue
+          if len(heap) < 10:
+              rewardsInHeap += ruleout.getTotalRewards()
+              stepsInHeap += ruleout.getSteps()
+              remainingsInHeap += ruleout.getRemainings()
+              heapq.heappush(heap, ruleout)
+          else:
+              smallest = heapq.nsmallest(1, heap)
+              if ruleout.getTotalRewards() <= smallest[0].getTotalRewards():
+                  continue
+              rewardsInHeap -= smallest[0].getTotalRewards()
+              stepsInHeap -= smallest[0].getSteps()
+              remainingsInHeap -= smallest[0].getRemainings()
+              heapq.heappop(heap)
+              heapq.heappush(heap, ruleout)
+              rewardsInHeap += ruleout.getTotalRewards()
+              stepsInHeap += ruleout.getSteps()
+              remainingsInHeap += ruleout.getRemainings()
+          if len(heap) == 100 and j == 99:
+              break
+
+        if len(heap) == 0:
+          print("Heap is empty.")
+          sys.stdout.flush()
+          if len(lastHeap) == 0:
+            continue
+          heap = lastHeap
+        latestAvg = rewardsInHeap / len(heap)
+        avgSteps = stepsInHeap / len(heap)
+        avgRemainings = remainingsInHeap / len(heap)
+        loss = None
+        baseline_loss = None,
+        grads = None
+        baseline_grads = None
+        for ruleout in heap:
+            episode_states = ruleout.getStates()
+            episode_actions = ruleout.getActions()
+            episode_rewards = ruleout.getRewards()
+            loss, baseline_loss, grads, baseline_grads = agent.train(episode_states, episode_actions, episode_rewards)
+            for i in range(1, len(episode_states)): # 转置之后再训练一遍，减少横竖偏向
+                episode_states[i] = np.transpose(episode_states[i])
+                a  = episode_actions[i]
+                episode_actions[i] = 7 * (a % 7) + (a // 7)
+            loss, baseline_loss, grads, baseline_grads = agent.train(episode_states, episode_actions, episode_rewards)
+        lastHeap = heap
+        if ((episode % 1) == 0):
           #print("Process:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss)
-          print("\033[FProcess:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss, "steps=", i, "remainings=", env.getRemainings())
+          print("\033[FProcess:", episode, " / ", totalsteps, "loss=", loss, "baseline_loss=", baseline_loss, "samples=", len(heap), "reward=", latestAvg, "steps=", avgSteps, "remainings=", avgRemainings, "grads=", grads, "baselinegrads=", baseline_grads)
           sys.stdout.flush()
     model = agent.getModel()
     input("模型训练结束，请按任意键开始走棋!")
